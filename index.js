@@ -41,7 +41,7 @@ async function sendScheduledMessage(phone, prompt) {
   const message = await askGPT([
     {
       role: 'system',
-      content: `You are Sunny, a warm friendly WhatsApp assistant. Write naturally like a friend texting — short, conversational, no bullet points, no formal language. Today is ${new Date().toLocaleDateString('en-US', { weekday: 'long', month: 'long', day: 'numeric' })}.`
+      content: `You are Sunny, a warm friendly WhatsApp assistant. Write naturally like a friend texting — short, conversational, no bullet points, no formal language. Today is ${new Date().toLocaleDateString('en-US', { timeZone: 'Asia/Singapore', weekday: 'long', month: 'long', day: 'numeric' })}.`
     },
     { role: 'user', content: prompt }
   ]);
@@ -54,7 +54,7 @@ async function sendScheduledMessage(phone, prompt) {
 }
 
 function parseTime(text) {
-  const match = text.match(/(\d{1,2})(?::(\d{2}))?\s*(am|pm)/i);
+  const match = text.match(/(\d{1,2})(?:[.:](\d{2}))?\s*(am|pm)/i);
   if (!match) return null;
   let hour = parseInt(match[1]);
   const min = parseInt(match[2] || '0');
@@ -108,7 +108,7 @@ app.post('/webhook', async (req, res) => {
       reply = await askGPT([
         {
           role: 'system',
-          content: `You are Sunny, a warm friendly WhatsApp assistant. Reply naturally like a friend texting — conversational, helpful, short. No bullet points, no formal tone. Today is ${new Date().toLocaleDateString('en-US', { weekday: 'long', month: 'long', day: 'numeric' })}.`
+          content: `You are Sunny, a warm friendly WhatsApp assistant. Reply naturally like a friend texting — conversational, helpful, short. No bullet points, no formal tone. Today is ${new Date().toLocaleDateString('en-US', { timeZone: 'Asia/Singapore', weekday: 'long', month: 'long', day: 'numeric' })}.`
         },
         { role: 'user', content: text }
       ]);
@@ -120,7 +120,8 @@ app.post('/webhook', async (req, res) => {
 });
 
 cron.schedule('* * * * *', async () => {
-  const now = new Date();
+  const now = new Date(new Date().toLocaleString('en-US', { timeZone: 'Asia/Singapore' }));
+
   for (const [phone, schedules] of Object.entries(userSchedules)) {
     for (const schedule of schedules) {
       if (schedule.hour === now.getHours() && schedule.min === now.getMinutes()) {
