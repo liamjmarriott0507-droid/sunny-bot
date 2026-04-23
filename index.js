@@ -7,178 +7,199 @@ const app = express();
 app.use(express.urlencoded({ extended: false }));
 
 const userSchedules = {};
-const activeCrons = {};
+const userMessageCount = {};
 
 const twilioClient = twilio(
   process.env.TWILIO_ACCOUNT_SID,
   process.env.TWILIO_AUTH_TOKEN
 );
 
-async function askGPT(messages) {
+async function callGPT(messages, maxTokens = 150) {
   const response = await axios.post(
     'https://api.openai.com/v1/chat/completions',
     {
-      model: 'gpt-4',
+      model: 'gpt-4o-mini',
       messages,
-      max_tokens: 300
+      max_tokens: maxTokens
     },
     { headers: { Authorization: `Bearer ${process.env.OPENAI_API_KEY}` } }
   );
-  return response.data.choices[0].message.content.trim();
+  return response.data.choices[0].message.content;
 }
 
-async function classifyMessage(text) {
-  const result = await askGPT([
+async function sendAIMessage(phone, prompt) {
+  const message = await callGPT([
     {
       role: 'system',
-      content: `You classify WhatsApp messages into one of three types. Reply with exactly one word:
-SCHEDULE — user wants to set up a new recurring or one-time scheduled message
-LIST — user wants to see their current schedules
-CANCEL — user wants to cancel/stop schedules
-CHAT — anything else, a question, conversation, or general request`
-    },
-    { role: 'user', content: text }
-  ]);
-  const upper = result.toUpperCase();
-  if (upper.includes('SCHEDULE')) return 'SCHEDULE';
-  if (upper.includes('LIST')) return 'LIST';
-  if (upper.includes('CANCEL')) return 'CANCEL';
-  return 'CHAT';
-}
-
-async function parseSchedule(text) {
-  const result = await askGPT([
-    {
-      role: 'system',
-      content: `You are a scheduling parser. Given a natural language scheduling request, extract:
-1. A valid cron expression (in Asia/Singapore timezone) that represents when to send the message
-2. The core message intent (stripped of all time/scheduling words)
-3. Whether this is a one-time message or recurring (one_time or recurring)
-4. A human readable description of the schedule (e.g. "every day at 7:00am", "this Monday at 3pm", "every weekday at 9am")
-
-Reply ONLY with valid JSON in this exact format, nothing else:
-{
-  "cron": "30 6 * * *",
-  "intent": "send a fun teuteuf game",
-  "type": "recurring",
-  "description": "every day at 6:30am"
-}
-
-Cron format is: minute hour day month weekday
-Weekdays: 0=Sunday, 1=Monday, 2=Tuesday, 3=Wednesday, 4=Thursday, 5=Friday, 6=Saturday
-Examples:
-- "every day at 7am" → "0 7 * * *"
-- "every weekday at 8am" → "0 8 * * 1-5"
-- "every weekend at 9am" → "0 9 * * 0,6"
-- "every Monday and Wednesday at 6pm" → "0 18 * * 1,3"
-- "every hour" → "0 * * * *"
-- "every 30 minutes" → "*/30 * * * *"
-- "once a week on Thursday at 7pm" → "0 19 * * 4"
-For one-time messages, still provide the cron but set type to "one_time".`
-    },
-    { role: 'user', content: text }
-  ]);
-
-  try {
-    const clean = result.replace(/```json|```/g, '').trim();
-    return JSON.parse(clean);
-  } catch (e) {
-    return null;
-  }
-}
-
-async function sendMessage(phone, prompt) {
-  const message = await askGPT([
-    {
-      role: 'system',
-      content: `You are Sunny, a warm friendly WhatsApp assistant. Write naturally like a friend texting — short, conversational, no bullet points, no formal language. Just respond directly to the prompt. Today is ${new Date().toLocaleDateString('en-US', { timeZone: 'Asia/Singapore', weekday: 'long', month: 'long', day: 'numeric' })}.`
+      content: `You are Sunny, a smart and efficient WhatsApp assistant.
+      
+      Your rules:
+      - If sending a reminder or simple message, send it cleanly and simply. Nothing more.
+      - For reminders like "tell me my mother is home" just say exactly that naturally with one emoji. Example: "Your mother is back home 🏠"
+      - Never add unnecessary commentary, questions, or emotional responses unless specifically asked
+      - Keep messages short, clean and to the point
+      - Only add warmth when genuinely appropriate like motivational messages
+      - Never ask follow up questions in reminder messages
+      - For motivational or creative content be warm and engaging
+      - Today is ${new Date().toLocaleDateString('en-US', {weekday:'long', month:'long', day:'numeric'})}`
     },
     { role: 'user', content: prompt }
-  ]);
+  ], 200);
+
+  if (!userMessageCount[phone]) userMessageCount[phone] = 0;
+  userMessageCount[phone]++;
+
+  let finalMessage = message;
+  if (userMessageCount[phone] % 5 === 0) {
+    finalMessage += '\n\n_Anything else I can help you with? 😊_';
+  }
 
   await twilioClient.messages.create({
     from: 'whatsapp:+14155238886',
     to: `whatsapp:${phone}`,
-    body: message
+    body: finalMessage
   });
 }
 
-function scheduleJob(phone, scheduleId, cronExp, prompt, type) {
-  const job = cron.schedule(cronExp, async () => {
-    await sendMessage(phone, prompt);
-    if (type === 'one_time') {
-      job.stop();
-      if (userSchedules[phone]) {
-        userSchedules[phone] = userSchedules[phone].filter(s => s.id !== scheduleId);
-      }
-      delete activeCrons[scheduleId];
-    }
-  }, { timezone: 'Asia/Singapore' });
+function parseTime(text) {
+  const match = text.match(/(\d{1,2})(?::(\d{2}))?\s*(am|pm)/i);
+  if (!match) return null;
+  let hour = parseInt(match[1]);
+  const min = parseInt(match[2] || '0');
+  const period = match[3].toLowerCase();
+  if (period === 'pm' && hour !== 12) hour += 12;
+  if (period === 'am' && hour === 12) hour = 0;
+  return { hour, min };
+}
 
-  activeCrons[scheduleId] = job;
+function extractMessage(text) {
+  return text
+    .replace(/at \d{1,2}(?::\d{2})?\s*(?:am|pm)/gi, '')
+    .replace(/today|tomorrow|every day|daily/gi, '')
+    .replace(/send me a message that|send me a message saying|remind me that|remind me to|send me/gi, '')
+    .trim();
+}
+
+async function buildPrompt(text) {
+  // Use GPT-4 itself to understand what the user wants
+  const result = await callGPT([
+    {
+      role: 'system',
+      content: `You are a prompt builder for a WhatsApp bot called Sunny.
+      
+      Given a user's schedule request, return a JSON object with:
+      - "label": short name for this schedule (e.g. "Motivation", "Trivia", "Reminder")
+      - "prompt": the exact instruction to send to the AI when this message fires
+      
+      Rules for the prompt:
+      - For reminders/messages: tell the AI to send it cleanly with one emoji, nothing extra
+      - For motivation: ask for short warm uplifting message, max 2 sentences
+      - For trivia/quiz/games: ask for a fun question with 3 options A B C
+      - For news: ask for 2 sentence friendly news summary
+      - For fun facts: ask for one fascinating fact, one sentence
+      - For jokes: ask for one short punchy funny joke
+      - For anything else: use GPT's intelligence to figure out the best prompt
+      
+      Return ONLY valid JSON like: {"label": "Reminder", "prompt": "..."}`
+    },
+    { role: 'user', content: text }
+  ], 200);
+
+  try {
+    const clean = result.replace(/```json|```/g, '').trim();
+    return JSON.parse(clean);
+  } catch(e) {
+    return {
+      label: 'Message',
+      prompt: `Send this as a clean simple WhatsApp message with one relevant emoji. Just the message, nothing extra: "${extractMessage(text)}"`
+    };
+  }
 }
 
 app.post('/webhook', async (req, res) => {
   const phone = req.body.From.replace('whatsapp:', '');
   const text = req.body.Body.trim();
+  const lowerText = text.toLowerCase();
 
   let reply = '';
 
-  const type = await classifyMessage(text);
-
-  if (type === 'CANCEL') {
-    if (userSchedules[phone]) {
-      userSchedules[phone].forEach(s => {
-        if (activeCrons[s.id]) {
-          activeCrons[s.id].stop();
-          delete activeCrons[s.id];
-        }
-      });
-    }
+  if (lowerText.includes('stop') || lowerText === 'cancel all') {
     userSchedules[phone] = [];
-    reply = "All your schedules have been cancelled! Text me anytime to set new ones.";
+    reply = "All schedules cancelled ✓ Text me anytime to set up new ones.";
 
-  } else if (type === 'LIST') {
+  } else if (lowerText === 'list' || lowerText.includes('my schedules') || lowerText.includes('what have i set')) {
     if (!userSchedules[phone] || userSchedules[phone].length === 0) {
-      reply = "You have no schedules set up yet! Just tell me what you want and when — I'll handle the rest.";
+      reply = "You have no active schedules yet!\n\nTry:\n'Motivation at 7am'\n'Trivia at 6:30am'\n'Remind me to call mum at 5pm'";
     } else {
-      const list = userSchedules[phone].map((s, i) => `${i + 1}. ${s.label} — ${s.description} (${s.type === 'one_time' ? 'one-time' : 'recurring'})`).join('\n');
-      reply = `Your schedules:\n${list}\n\nText 'cancel all' to remove everything.`;
+      const list = userSchedules[phone].map((s, i) => {
+        const hour12 = s.hour % 12 || 12;
+        const ampm = s.hour >= 12 ? 'pm' : 'am';
+        const min = String(s.min).padStart(2, '0');
+        return `${i + 1}. ${s.label} at ${hour12}:${min}${ampm}`;
+      }).join('\n');
+      reply = `Your schedules:\n${list}\n\nText 'stop' to cancel all.`;
     }
 
-  } else if (type === 'SCHEDULE') {
-    const parsed = await parseSchedule(text);
-
-    if (parsed && cron.validate(parsed.cron)) {
-      if (!userSchedules[phone]) userSchedules[phone] = [];
-      const scheduleId = `${phone}_${Date.now()}`;
-      const schedule = {
-        id: scheduleId,
-        prompt: parsed.intent,
-        label: parsed.intent,
-        description: parsed.description,
-        cron: parsed.cron,
-        type: parsed.type
-      };
-      userSchedules[phone].push(schedule);
-      scheduleJob(phone, scheduleId, parsed.cron, parsed.intent, parsed.type);
-      reply = `Done! ${parsed.type === 'one_time' ? "I'll send that" : "I'll send that"} ${parsed.description}. Text 'list' to see all your schedules.`;
-    } else {
-      reply = "I couldn't quite figure out that schedule. Try something like 'send me motivation every day at 7am' or 'say hello this Friday at 3pm'.";
-    }
+  } else if (lowerText === 'help') {
+    reply = `Here's what I can do:\n\n⏰ *Schedule anything*\n"Motivation at 7am"\n"Trivia at 6:30am"\n"Remind me to call mum at 5pm"\n"Daily Spanish word at 8am"\n"Joke at 9am"\n\n📋 *Manage schedules*\n"List" — see your schedules\n"Stop" — cancel all\n\nJust tell me what you want and when! 😊`;
 
   } else {
-    reply = await askGPT([
-      {
-        role: 'system',
-        content: `You are Sunny, a warm friendly WhatsApp assistant. Reply naturally like a friend texting — conversational, helpful, short. No bullet points, no formal tone. Today is ${new Date().toLocaleDateString('en-US', { timeZone: 'Asia/Singapore', weekday: 'long', month: 'long', day: 'numeric' })}.`
-      },
-      { role: 'user', content: text }
-    ]);
+    const time = parseTime(lowerText);
+
+    if (time) {
+      if (!userSchedules[phone]) userSchedules[phone] = [];
+
+      // Let GPT-4 figure out what the user wants
+      const { label, prompt } = await buildPrompt(text);
+
+      userSchedules[phone].push({ prompt, label, hour: time.hour, min: time.min });
+
+      const hour12 = time.hour % 12 || 12;
+      const ampm = time.hour >= 12 ? 'pm' : 'am';
+      const min = String(time.min).padStart(2, '0');
+
+      reply = `✓ Got it! I'll send your ${label.toLowerCase()} every day at ${hour12}:${min}${ampm}.\n\nText 'list' to see all your schedules.`;
+
+    } else {
+      // No time — let GPT-4 handle it as a general conversation
+      try {
+        reply = await callGPT([
+          {
+            role: 'system',
+            content: `You are Sunny, a helpful WhatsApp assistant. 
+            Answer helpfully and concisely in max 3 sentences. 
+            If the user seems to want to schedule something but forgot a time, suggest they add a time like "at 7am".
+            Never be overly chatty or emotional. Be clean, smart and helpful.`
+          },
+          { role: 'user', content: text }
+        ], 150);
+      } catch(e) {
+        reply = "Hey! To schedule a message just include a time — for example:\n'Motivation at 7am'\n'Remind me to call mum at 5pm'";
+      }
+    }
   }
 
   res.set('Content-Type', 'text/xml');
   res.send(`<Response><Message>${reply}</Message></Response>`);
+});
+
+cron.schedule('* * * * *', async () => {
+  const now = new Date();
+  const currentHour = now.getHours();
+  const currentMin = now.getMinutes();
+
+  for (const [phone, schedules] of Object.entries(userSchedules)) {
+    if (!schedules) continue;
+    for (const schedule of schedules) {
+      if (schedule.hour === currentHour && schedule.min === currentMin) {
+        try {
+          await sendAIMessage(phone, schedule.prompt);
+        } catch(e) {
+          console.error('Error sending scheduled message:', e);
+        }
+      }
+    }
+  }
 });
 
 app.listen(3000, () => console.log('Sunny bot running!'));
