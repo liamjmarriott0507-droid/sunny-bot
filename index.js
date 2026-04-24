@@ -55,7 +55,7 @@ async function sendAIMessage(phone, prompt) {
   }
 
   await twilioClient.messages.create({
-    from: 'whatsapp:+14155238886',
+    from: 'whatsapp:+15559408945',
     to: `whatsapp:${phone}`,
     body: finalMessage
   });
@@ -81,7 +81,6 @@ function extractMessage(text) {
 }
 
 async function buildPrompt(text) {
-  // Use GPT-4 itself to understand what the user wants
   const result = await callGPT([
     {
       role: 'system',
@@ -149,7 +148,6 @@ app.post('/webhook', async (req, res) => {
     if (time) {
       if (!userSchedules[phone]) userSchedules[phone] = [];
 
-      // Let GPT-4 figure out what the user wants
       const { label, prompt } = await buildPrompt(text);
 
       userSchedules[phone].push({ prompt, label, hour: time.hour, min: time.min });
@@ -161,7 +159,6 @@ app.post('/webhook', async (req, res) => {
       reply = `✓ Got it! I'll send your ${label.toLowerCase()} every day at ${hour12}:${min}${ampm}.\n\nText 'list' to see all your schedules.`;
 
     } else {
-      // No time — let GPT-4 handle it as a general conversation
       try {
         reply = await callGPT([
           {
