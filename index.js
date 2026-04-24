@@ -8,6 +8,7 @@ app.use(express.urlencoded({ extended: false }));
 
 const userSchedules = {};
 const userConversations = {};
+const userProfiles = {}; // tracks first-time users
 
 const twilioClient = twilio(
   process.env.TWILIO_ACCOUNT_SID,
@@ -40,7 +41,7 @@ async function parseIntent(userText, phone) {
 
   const history = userConversations[phone] || [];
 
-  const systemPrompt = `You are Sunny — a highly intelligent, autonomous WhatsApp assistant. You have the same reasoning ability as ChatGPT. Use it fully.
+  const systemPrompt = `You are Sunny — a highly intelligent, autonomous WhatsApp assistant for DailyDrop. You have the same reasoning ability as ChatGPT. Use it fully.
 
 Current time: ${timeStr} (Singapore SGT = UTC+8)
 User's active schedules (by index):
@@ -48,40 +49,47 @@ ${scheduleList}
 
 Your job: understand what the user wants and return a single JSON object. No markdown, no extra text — just raw JSON.
 
+FORMATTING RULES for all replies (WhatsApp only supports these):
+- Use *bold* for headers, labels, times and key info
+- Use _italic_ for subtle notes or hints
+- Use emojis as visual anchors — ⏰ for time, ✅ for confirmations, ❌ for cancellations, 📋 for lists, 💡 for tips
+- Break messages into short paragraphs, never walls of text
+- For lists, put each item on its own line
+
 Choose one action:
 
 "schedule" — user wants to set up a message
 {
   "action": "schedule",
   "label": string,
-  "prompt": string — YOU write this prompt with full intelligence. Think deeply: what will make the best possible message when this fires? Consider tone, format, depth, creativity, and context. This is entirely your call.
+  "prompt": string — YOU write this with full intelligence. Think about tone, format, depth, creativity. This is your canvas. Include WhatsApp formatting instructions in the prompt so the fired message is also well-formatted.
   "hour": number (0-23 SGT),
   "min": number (0-59),
   "oneTime": boolean,
   "skipToday": boolean — true only if user said "tomorrow",
-  "reply": string — your natural, intelligent reply to the user
+  "reply": string — confirm with the exact time in bold e.g. "✅ Got it! I'll send your *Daily Motivation* every day at *7:00am* 🌅"
 }
 
 "cancel" — user wants to remove schedule(s). Match by index, label, time, or "last"
 {
   "action": "cancel",
   "indices": number[] or "all",
-  "reply": string
+  "reply": string — use ❌ and bold the cancelled schedule name
 }
 
 "list" — user wants to see their schedules
 {
   "action": "list",
-  "reply": string — YOU decide how to present this. Make it clear, friendly and well-formatted for WhatsApp. Raw data: ${scheduleList}
+  "reply": string — format beautifully for WhatsApp. Use 📋 header, bold each label, show time clearly. If empty, suggest 3 example schedules they could set up. Raw data: ${scheduleList}
 }
 
-"chat" — anything else
+"chat" — anything else including ambiguous messages
 {
   "action": "chat",
-  "reply": string — respond with full intelligence. No length limit. Answer like ChatGPT would.
+  "reply": string — respond with full intelligence. If the message is ambiguous, ask one clear clarifying question. If they want something Sunny can't do, acknowledge it warmly and suggest what Sunny can do instead. No length limit.
 }
 
-You have complete autonomy. There are no rules about tone, format, or style — use your best judgment every time.`;
+You have complete autonomy over tone, style, and content. Always be warm but efficient. Use your best judgment.`;
 
   const messages = [
     { role: 'system', content: systemPrompt },
@@ -112,8 +120,11 @@ async function fireScheduledMessage(phone, schedule) {
   const message = await callGPT([
     {
       role: 'system',
-      content: `You are Sunny, a WhatsApp assistant. Current time: ${timeStr} (Singapore).
-You are delivering a scheduled message. Use your full intelligence — you decide everything: tone, length, format, depth, creativity. Make it excellent. Do not mention it is scheduled or add meta-commentary.`
+      content: `You are Sunny, a WhatsApp assistant for DailyDrop. Current time: ${timeStr} (Singapore).
+You are delivering a scheduled message. Use your full intelligence — tone, length, format, creativity are all your call. Make it excellent.
+
+WhatsApp formatting available: *bold*, _italic_, emojis. Use them to make the message clear and visually appealing. Never use markdown headers or bullet points with dashes.
+Do not mention it is scheduled. Do not add meta-commentary.`
     },
     { role: 'user', content: schedule.prompt }
   ], 500);
@@ -121,9 +132,42 @@ You are delivering a scheduled message. Use your full intelligence — you decid
   await sendWhatsApp(phone, message);
 }
 
+function getOnboardingMessage() {
+  return `👋 *Hey, I'm Sunny!* Your personal WhatsApp assistant from DailyDrop.
+
+Here's what I can do:
+
+⏰ *Schedule anything*
+_"Motivation at 7am"_
+_"Remind me to call mum at 5pm"_
+_"Daily trivia at 6:30am"_
+_"Joke every day at 9am"_
+
+📋 *Manage your schedules*
+_"List"_ — see all your schedules
+_"Cancel [name]"_ — remove one
+_"Cancel all"_ — start fresh
+
+💬 *Just chat*
+Ask me anything — I'll do my best to help.
+
+What would you like to set up? 😊`;
+}
+
 app.post('/webhook', async (req, res) => {
   const phone = req.body.From.replace('whatsapp:', '');
   const text = req.body.Body.trim();
+
+  // First-time user onboarding
+  if (!userProfiles[phone]) {
+    userProfiles[phone] = { joinedAt: new Date().toISOString() };
+    userConversations[phone] = [];
+    userSchedules[phone] = [];
+
+    res.set('Content-Type', 'text/xml');
+    res.send(`<Response><Message>${getOnboardingMessage()}</Message></Response>`);
+    return;
+  }
 
   if (!userConversations[phone]) userConversations[phone] = [];
   userConversations[phone].push({ role: 'user', content: text });
@@ -167,13 +211,13 @@ app.post('/webhook', async (req, res) => {
       reply = await callGPT([
         {
           role: 'system',
-          content: `You are Sunny, a highly intelligent WhatsApp assistant. Respond naturally and helpfully with full intelligence.`
+          content: `You are Sunny, a highly intelligent WhatsApp assistant for DailyDrop. Respond naturally and helpfully. Use *bold* and emojis where appropriate for WhatsApp.`
         },
         ...(userConversations[phone] || []),
         { role: 'user', content: text }
       ], 400);
     } catch {
-      reply = "Something went wrong on my end — try again in a moment!";
+      reply = "Something went wrong on my end — try again in a moment! 🙏";
     }
   }
 
