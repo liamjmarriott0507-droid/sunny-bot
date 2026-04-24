@@ -55,14 +55,15 @@ async function sendAIMessage(phone, prompt) {
   }
 
   await twilioClient.messages.create({
-    from: 'whatsapp:+15559408945',
+    from: 'whatsapp:+14155238886',
     to: `whatsapp:${phone}`,
     body: finalMessage
   });
 }
 
 function parseTime(text) {
-  const match = text.match(/(\d{1,2})(?::(\d{2}))?\s*(am|pm)/i);
+  // handles 8:49am, 8.49am, 8am, 8 am etc
+  const match = text.match(/(\d{1,2})(?:[:\.](\d{2}))?\s*(am|pm)/i);
   if (!match) return null;
   let hour = parseInt(match[1]);
   const min = parseInt(match[2] || '0');
@@ -74,7 +75,7 @@ function parseTime(text) {
 
 function extractMessage(text) {
   return text
-    .replace(/at \d{1,2}(?::\d{2})?\s*(?:am|pm)/gi, '')
+    .replace(/at \d{1,2}(?:[:.]\d{2})?\s*(?:am|pm)/gi, '')
     .replace(/today|tomorrow|every day|daily/gi, '')
     .replace(/send me a message that|send me a message saying|remind me that|remind me to|send me/gi, '')
     .trim();
@@ -134,13 +135,14 @@ app.post('/webhook', async (req, res) => {
         const hour12 = s.hour % 12 || 12;
         const ampm = s.hour >= 12 ? 'pm' : 'am';
         const min = String(s.min).padStart(2, '0');
-        return `${i + 1}. ${s.label} at ${hour12}:${min}${ampm}`;
+        const freq = s.oneTime ? 'one time' : 'daily';
+        return `${i + 1}. ${s.label} at ${hour12}:${min}${ampm} (${freq})`;
       }).join('\n');
       reply = `Your schedules:\n${list}\n\nText 'stop' to cancel all.`;
     }
 
   } else if (lowerText === 'help') {
-    reply = `Here's what I can do:\n\n⏰ *Schedule anything*\n"Motivation at 7am"\n"Trivia at 6:30am"\n"Remind me to call mum at 5pm"\n"Daily Spanish word at 8am"\n"Joke at 9am"\n\n📋 *Manage schedules*\n"List" — see your schedules\n"Stop" — cancel all\n\nJust tell me what you want and when! 😊`;
+    reply = `Here's what I can do:\n\n⏰ *Schedule anything*\n"Motivation at 7am"\n"Trivia at 6:30am"\n"Remind me to call mum at 5pm"\n"Daily Spanish word at 8am"\n"Joke at 9am"\n"Remind me today at 3pm to drink water"\n\n📋 *Manage schedules*\n"List" — see your schedules\n"Stop" — cancel all\n\nJust tell me what you want and when! 😊`;
 
   } else {
     const time = parseTime(lowerText);
@@ -148,15 +150,23 @@ app.post('/webhook', async (req, res) => {
     if (time) {
       if (!userSchedules[phone]) userSchedules[phone] = [];
 
+      const isOneTime = lowerText.includes('today');
       const { label, prompt } = await buildPrompt(text);
 
-      userSchedules[phone].push({ prompt, label, hour: time.hour, min: time.min });
+      userSchedules[phone].push({ 
+        prompt, 
+        label, 
+        hour: time.hour, 
+        min: time.min,
+        oneTime: isOneTime,
+        fired: false
+      });
 
       const hour12 = time.hour % 12 || 12;
       const ampm = time.hour >= 12 ? 'pm' : 'am';
       const min = String(time.min).padStart(2, '0');
 
-      reply = `✓ Got it! I'll send your ${label.toLowerCase()} every day at ${hour12}:${min}${ampm}.\n\nText 'list' to see all your schedules.`;
+      reply = `✓ Got it! I'll send your ${label.toLowerCase()} ${isOneTime ? 'today' : 'every day'} at ${hour12}:${min}${ampm}.\n\nText 'list' to see all your schedules.`;
 
     } else {
       try {
@@ -187,10 +197,15 @@ cron.schedule('* * * * *', async () => {
 
   for (const [phone, schedules] of Object.entries(userSchedules)) {
     if (!schedules) continue;
-    for (const schedule of schedules) {
+    for (let i = schedules.length - 1; i >= 0; i--) {
+      const schedule = schedules[i];
       if (schedule.hour === currentHour && schedule.min === currentMin) {
+        if (schedule.oneTime && schedule.fired) continue;
         try {
           await sendAIMessage(phone, schedule.prompt);
+          if (schedule.oneTime) {
+            schedules.splice(i, 1);
+          }
         } catch(e) {
           console.error('Error sending scheduled message:', e);
         }
