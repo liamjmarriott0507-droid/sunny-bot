@@ -176,7 +176,7 @@ You have complete autonomy over tone, style, and content. Always be warm but eff
 // ─── WHATSAPP ─────────────────────────────────────────────────────────────────
 async function sendWhatsApp(phone, text) {
   await twilioClient.messages.create({
-    from: `whatsapp:${process.env.TWILIO_WHATSAPP_NUMBER || '+14155238886'}`,
+    from: 'whatsapp:+15559408945',
     to: `whatsapp:${phone}`,
     body: text
   });
@@ -284,7 +284,6 @@ app.post('/webhook', async (req, res) => {
       reply = intent.reply;
 
     } else if (intent.action === 'news_now') {
-      // Respond immediately then fetch async so WhatsApp doesn't time out
       res.set('Content-Type', 'text/xml');
       res.send(`<Response><Message>${intent.reply}</Message></Response>`);
       buildNewsSummary().then(digest => sendWhatsApp(phone, digest)).catch(console.error);
