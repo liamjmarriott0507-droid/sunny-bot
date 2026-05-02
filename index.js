@@ -1,26 +1,19 @@
-const express = require('express');
-const twilio = require('twilio');
+const TelegramBot = require('node-telegram-bot-api');
 const axios = require('axios');
 const cron = require('node-cron');
 const xml2js = require('xml2js');
 
-const app = express();
-app.use(express.urlencoded({ extended: false }));
+const bot = new TelegramBot(process.env.BOT_TOKEN, { polling: true });
 
 const userSchedules = {};
 const userConversations = {};
 const userProfiles = {};
 
-const twilioClient = twilio(
-  process.env.TWILIO_ACCOUNT_SID,
-  process.env.TWILIO_AUTH_TOKEN
-);
-
 // ─── RSS FEEDS ───────────────────────────────────────────────────────────────
 const RSS_FEEDS = [
-  { name: 'CNA Singapore',  url: 'https://www.channelnewsasia.com/rss/8395986' },
-  { name: 'BBC World',      url: 'https://feeds.bbci.co.uk/news/world/rss.xml' },
-  { name: 'Reuters',        url: 'https://feeds.reuters.com/reuters/topNews' },
+  { name: 'CNA Singapore', url: 'https://www.channelnewsasia.com/rss/8395986' },
+  { name: 'BBC World',     url: 'https://feeds.bbci.co.uk/news/world/rss.xml' },
+  { name: 'Reuters',       url: 'https://feeds.reuters.com/reuters/topNews' },
 ];
 
 async function fetchRSSFeed(feed) {
@@ -54,7 +47,7 @@ async function buildNewsSummary() {
   const summary = await callGPT([
     {
       role: 'system',
-      content: `You are Sunny, a WhatsApp news assistant. Today is ${dateStr} (Singapore).
+      content: `You are Sunny, a Telegram news assistant. Today is ${dateStr} (Singapore).
 You have been given today's headlines from multiple sources. Find and present exactly 5 positive, uplifting or constructive stories.
 
 What counts as positive: breakthroughs, achievements, inspiring stories, progress, innovations, acts of kindness, scientific discoveries, economic wins.
@@ -87,7 +80,7 @@ async function callGPT(messages, maxTokens = 500) {
   return response.data.choices[0].message.content;
 }
 
-async function parseIntent(userText, phone) {
+async function parseIntent(userText, chatId) {
   const now = new Date();
   const timeStr = now.toLocaleString('en-US', {
     weekday: 'long', month: 'long', day: 'numeric',
@@ -95,7 +88,7 @@ async function parseIntent(userText, phone) {
     timeZone: 'Asia/Singapore'
   });
 
-  const scheduleList = (userSchedules[phone] || []).map((s, i) => {
+  const scheduleList = (userSchedules[chatId] || []).map((s, i) => {
     const h12 = s.hour % 12 || 12;
     const ampm = s.hour >= 12 ? 'pm' : 'am';
     const min = String(s.min).padStart(2, '0');
@@ -103,9 +96,9 @@ async function parseIntent(userText, phone) {
     return `${i}: ${s.label} at ${h12}:${min}${ampm} (${type})`;
   }).join('\n') || 'none';
 
-  const history = userConversations[phone] || [];
+  const history = userConversations[chatId] || [];
 
-  const systemPrompt = `You are Sunny — a highly intelligent, autonomous WhatsApp assistant for DailyDrop. You have the same reasoning ability as ChatGPT. Use it fully.
+  const systemPrompt = `You are Sunny — a highly intelligent, autonomous Telegram assistant for DailyDrop. You have the same reasoning ability as ChatGPT. Use it fully.
 
 Current time: ${timeStr} (Singapore SGT = UTC+8)
 User's active schedules (by index):
@@ -113,7 +106,7 @@ ${scheduleList}
 
 Your job: understand what the user wants and return a single JSON object. No markdown, no extra text — just raw JSON.
 
-FORMATTING RULES for all replies (WhatsApp only supports these):
+FORMATTING RULES for all replies (Telegram supports these):
 - Use *bold* for headers, labels, times and key info
 - Use _italic_ for subtle notes or hints
 - Use emojis as visual anchors — ⏰ for time, ✅ for confirmations, ❌ for cancellations, 📋 for lists, 💡 for tips, 📰 for news
@@ -145,10 +138,10 @@ Choose one action:
 "list" — user wants to see their schedules
 {
   "action": "list",
-  "reply": string — format beautifully for WhatsApp. Use 📋 header, bold each label, show time clearly. If empty, suggest examples. Raw data: ${scheduleList}
+  "reply": string — format beautifully. Use 📋 header, bold each label, show time clearly. If empty, suggest examples. Raw data: ${scheduleList}
 }
 
-"news_now" — user wants news, headlines, or real-time information RIGHT NOW (not scheduled). Trigger this for: "news", "news now", "what's happening", "latest news", "give me news", "show me news", "today's news", or any request for current headlines/updates. This takes priority over "chat" whenever news or current events are mentioned.
+"news_now" — user wants news right now
 {
   "action": "news_now",
   "reply": string — brief acknowledgement like "Fetching today's news for you 📰"
@@ -173,16 +166,12 @@ You have complete autonomy over tone, style, and content. Always be warm but eff
   return JSON.parse(clean);
 }
 
-// ─── WHATSAPP ─────────────────────────────────────────────────────────────────
-async function sendWhatsApp(phone, text) {
-  await twilioClient.messages.create({
-    from: 'whatsapp:+15559408945',
-    to: `whatsapp:${phone}`,
-    body: text
-  });
+// ─── SEND MESSAGE ─────────────────────────────────────────────────────────────
+async function sendTelegram(chatId, text) {
+  await bot.sendMessage(chatId, text, { parse_mode: 'Markdown' });
 }
 
-async function fireScheduledMessage(phone, schedule) {
+async function fireScheduledMessage(chatId, schedule) {
   const timeStr = new Date().toLocaleString('en-US', {
     weekday: 'long', month: 'long', day: 'numeric',
     hour: '2-digit', minute: '2-digit', hour12: true,
@@ -197,21 +186,21 @@ async function fireScheduledMessage(phone, schedule) {
     message = await callGPT([
       {
         role: 'system',
-        content: `You are Sunny, a WhatsApp assistant for DailyDrop. Current time: ${timeStr} (Singapore).
+        content: `You are Sunny, a Telegram assistant for DailyDrop. Current time: ${timeStr} (Singapore).
 You are delivering a scheduled message. Use your full intelligence — tone, length, format, creativity are all your call. Make it excellent.
-WhatsApp formatting: *bold*, _italic_, emojis. Never use markdown headers or dash bullet points.
+Telegram formatting: *bold*, _italic_, emojis.
 Do not mention it is scheduled. Do not add meta-commentary.`
       },
       { role: 'user', content: schedule.prompt }
     ], 500);
   }
 
-  await sendWhatsApp(phone, message);
+  await sendTelegram(chatId, message);
 }
 
 // ─── ONBOARDING ───────────────────────────────────────────────────────────────
 function getOnboardingMessage() {
-  return `👋 *Hey, I'm Sunny!* Your personal WhatsApp assistant from DailyDrop.
+  return `👋 *Hey, I'm Sunny!* Your personal Telegram assistant from DailyDrop.
 
 Here's what I can do:
 
@@ -236,32 +225,34 @@ Ask me anything — I'll do my best to help.
 What would you like to set up? 😊`;
 }
 
-// ─── WEBHOOK ──────────────────────────────────────────────────────────────────
-app.post('/webhook', async (req, res) => {
-  const phone = req.body.From.replace('whatsapp:', '');
-  const text = req.body.Body.trim();
+// ─── MESSAGE HANDLER ──────────────────────────────────────────────────────────
+bot.on('message', async (msg) => {
+  const chatId = msg.chat.id;
+  const text = msg.text ? msg.text.trim() : '';
 
-  if (!userProfiles[phone]) {
-    userProfiles[phone] = { joinedAt: new Date().toISOString() };
-    userConversations[phone] = [];
-    userSchedules[phone] = [];
-    res.set('Content-Type', 'text/xml');
-    res.send(`<Response><Message>${getOnboardingMessage()}</Message></Response>`);
+  if (!text) return;
+
+  // New user onboarding
+  if (!userProfiles[chatId]) {
+    userProfiles[chatId] = { joinedAt: new Date().toISOString() };
+    userConversations[chatId] = [];
+    userSchedules[chatId] = [];
+    await sendTelegram(chatId, getOnboardingMessage());
     return;
   }
 
-  if (!userConversations[phone]) userConversations[phone] = [];
-  userConversations[phone].push({ role: 'user', content: text });
-  if (userConversations[phone].length > 10) userConversations[phone].shift();
+  if (!userConversations[chatId]) userConversations[chatId] = [];
+  userConversations[chatId].push({ role: 'user', content: text });
+  if (userConversations[chatId].length > 10) userConversations[chatId].shift();
 
   let reply = '';
 
   try {
-    const intent = await parseIntent(text, phone);
+    const intent = await parseIntent(text, chatId);
 
     if (intent.action === 'schedule') {
-      if (!userSchedules[phone]) userSchedules[phone] = [];
-      userSchedules[phone].push({
+      if (!userSchedules[chatId]) userSchedules[chatId] = [];
+      userSchedules[chatId].push({
         prompt: intent.prompt || '',
         label: intent.label,
         hour: intent.hour,
@@ -276,17 +267,16 @@ app.post('/webhook', async (req, res) => {
 
     } else if (intent.action === 'cancel') {
       if (intent.indices === 'all') {
-        userSchedules[phone] = [];
+        userSchedules[chatId] = [];
       } else if (Array.isArray(intent.indices)) {
         const toRemove = new Set(intent.indices);
-        userSchedules[phone] = (userSchedules[phone] || []).filter((_, i) => !toRemove.has(i));
+        userSchedules[chatId] = (userSchedules[chatId] || []).filter((_, i) => !toRemove.has(i));
       }
       reply = intent.reply;
 
     } else if (intent.action === 'news_now') {
-      res.set('Content-Type', 'text/xml');
-      res.send(`<Response><Message>${intent.reply}</Message></Response>`);
-      buildNewsSummary().then(digest => sendWhatsApp(phone, digest)).catch(console.error);
+      await sendTelegram(chatId, intent.reply);
+      buildNewsSummary().then(digest => sendTelegram(chatId, digest)).catch(console.error);
       return;
 
     } else if (intent.action === 'list' || intent.action === 'chat') {
@@ -299,9 +289,9 @@ app.post('/webhook', async (req, res) => {
       reply = await callGPT([
         {
           role: 'system',
-          content: `You are Sunny, a highly intelligent WhatsApp assistant for DailyDrop. Respond naturally and helpfully. Use *bold* and emojis where appropriate.`
+          content: `You are Sunny, a highly intelligent Telegram assistant for DailyDrop. Respond naturally and helpfully. Use *bold* and emojis where appropriate.`
         },
-        ...(userConversations[phone] || []),
+        ...(userConversations[chatId] || []),
         { role: 'user', content: text }
       ], 400);
     } catch {
@@ -309,11 +299,10 @@ app.post('/webhook', async (req, res) => {
     }
   }
 
-  userConversations[phone].push({ role: 'assistant', content: reply });
-  if (userConversations[phone].length > 10) userConversations[phone].shift();
+  userConversations[chatId].push({ role: 'assistant', content: reply });
+  if (userConversations[chatId].length > 10) userConversations[chatId].shift();
 
-  res.set('Content-Type', 'text/xml');
-  res.send(`<Response><Message>${reply}</Message></Response>`);
+  await sendTelegram(chatId, reply);
 });
 
 // ─── CRON ─────────────────────────────────────────────────────────────────────
@@ -325,7 +314,7 @@ cron.schedule('* * * * *', async () => {
   const currentHour = Math.floor(sgtTotalMin / 60);
   const currentMin = sgtTotalMin % 60;
 
-  for (const [phone, schedules] of Object.entries(userSchedules)) {
+  for (const [chatId, schedules] of Object.entries(userSchedules)) {
     if (!schedules) continue;
     for (let i = schedules.length - 1; i >= 0; i--) {
       const s = schedules[i];
@@ -334,7 +323,7 @@ cron.schedule('* * * * *', async () => {
       if (s.oneTime && s.fired) continue;
 
       try {
-        await fireScheduledMessage(phone, s);
+        await fireScheduledMessage(chatId, s);
         if (s.oneTime) {
           schedules.splice(i, 1);
         } else {
@@ -342,10 +331,10 @@ cron.schedule('* * * * *', async () => {
           setTimeout(() => { if (s) s.fired = false; }, 61000);
         }
       } catch (e) {
-        console.error(`Error firing schedule for ${phone}:`, e);
+        console.error(`Error firing schedule for ${chatId}:`, e);
       }
     }
   }
 });
 
-app.listen(3000, () => console.log('Sunny bot running on port 3000'));
+console.log('Sunny bot running on Telegram...');
